@@ -10,8 +10,8 @@ import json
 
 ssl._create_default_https_context = ssl._create_unverified_context
 musicbrainzngs.set_useragent('a', '1.0')
-client_id = "ba462f450a74477d9dfdb692fffeb594"
-client_secret = "03bc75813f8b4589b3a1c01c0e7a55d6"
+client_id = "b" # replace with yours
+client_secret = "0" # replace with yours
 client_credentials_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
 sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
 
