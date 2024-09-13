@@ -1,0 +1,273 @@
+library(shiny)
+library(shinyjs)
+library(dplyr) 
+library(networkD3)
+library(data.table)
+library(countrycode)
+library(lubridate)
+library(ggplot2)
+library(forcats)
+library(rsconnect)
+
+rsconnect::setAccountInfo(name='federicopaschetta',
+                          token='3D74BA6655548A116BD5C00B489C4C7C',
+                          secret='TaXIIKT3ra3qf6W1D42qmkxi3UfGcTDuTK6uSnse')
+# DATA
+artists = fread('artists.csv')
+albums = fread('albums.csv')
+albums$Date = as.Date(albums$Date, format='%Y-%m-%d')
+songs = fread('songs.csv')
+featurings = fread('featurings.csv')
+artists$id <- 0:(nrow(artists) - 1)
+artists$Continent <- unlist(countrycode(
+  sourcevar = artists$Country,
+  origin = 'genc2c',
+  destination = 'continent',
+))
+
+condition = artists$Continent=='Americas'
+artists$Continent = ifelse(condition, countrycode(
+  sourcevar=artists$Country,
+  origin = 'genc2c',
+  destination = 'region'
+), artists$Continent)
+
+# FILTERING
+songs_filtered = songs[songs$Popularity>60]
+ColourScale <- 'd3.scaleOrdinal().domain(["Africa", "Asia", "Europe",
+"Oceania"]).range(["#FF6666", "#6699FF", "#66FF99", "#FFFF66",
+"#CC99FF", "#FF9900"]);'
+featuring = inner_join(featurings, songs_filtered, c("SongID"="ID"))
+featuring$Name = NULL
+merged_data <- merge(featuring, artists, by.x = "Artist1ID", by.y = "ID", all.x = TRUE)
+merged_data <- merge(merged_data, artists, by.x = "Artist2ID", by.y = "ID", all.x = TRUE)
+merged_data <- merge(merged_data, albums, by.x = "Album ID", by.y = "ID", all.x = TRUE)
+years_list <- sort(unique(year(as.Date(merged_data$Date))))
+
+# DATASET FOR THIRD IDIOM
+third_idiom_data <- merge(songs, albums, by.x='Album ID', by.y='ID', all=FALSE)
+third_idiom_data$Genere = NULL
+third_idiom_data$'Main artist'=NULL
+third_idiom_data$Cover = NULL
+third_idiom_data<-merge(third_idiom_data, artists, by.x='Main Artist', by.y='Name', all=FALSE)
+third_idiom_data$Popularity.y = NULL
+third_idiom_data <- na.omit(third_idiom_data)
+first_genres <- names(head(sort(table(third_idiom_data$`Main Genre`), decreasing = TRUE), 8))
+condition_genres = third_idiom_data$`Main Genre` %in% first_genres
+cleaned_df = third_idiom_data[condition_genres]
+cleaned_df$`Main Genre`[cleaned_df$`Main Genre`=="N/A"] <- "Others"
+years_list <- sort(unique(year(as.Date(cleaned_df$Date))))
+
+
+### IDIOMS
+# FIRST IDIOM
+plot_lineChart <- function(df, firstRegion, secondRegion) {
+  if(firstRegion=='All' | secondRegion=='All') {
+    condition1 = df$Continent.x != df$Continent.y
+    condition2 = FALSE
+  } else {
+    condition1 = df$Continent.x==firstRegion & df$Continent.y==secondRegion
+    condition2 = df$Continent.y==firstRegion & df$Continent.x==secondRegion
+  }
+  idiom2_df = df[condition1 | condition2]
+  idiom2_df$Date = lubridate::year(idiom2_df$Date)
+  grouped_df =na.omit(idiom2_df %>%group_by(Date) %>% count())
+  ggplot(grouped_df, aes(x=grouped_df$Date, y=grouped_df$n))+ 
+    labs(x='Date', y='Frequency') +
+    theme(axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size = 14), 
+          axis.title.y = element_text(size = 14)) +
+    geom_line()+geom_point()
+}
+
+# FIRST IDIOM UI
+app1UI <- function(id) {
+  ns <- NS(id)
+  tagList(
+    selectInput(ns("var"), 
+                label = "Select the first continent to compare",
+                choices = c("All","Europe","Latin America & Caribbean",
+                            "North America"),
+                selected = "All"),
+    conditionalPanel(
+      condition = paste0("input['", ns("var"), "'] !== 'All'"),
+      selectInput(ns("var1"), 
+                  label = "Select the second continent to compare",
+                  choices = c("Europe","Latin America & Caribbean",
+                              "North America"),
+                  selected = "Europe")),
+  plotOutput(ns("map")))
+}
+
+# FIRST IDIOM SERVER
+app1Server <- function(id){
+  moduleServer(id, function(input, output, session) {
+    output$map <- renderPlot({
+      plot_lineChart(merged_data, input$var, input$var1)
+    })
+  })
+}
+
+# SECOND IDIOM
+Nodes = data.frame(name = artists$Name, artistId = artists$id, group=artists$Continent,
+                   popularity = artists$Popularity)
+
+edges_selection <- function(year1, year2) {
+  if (year1 == year2) {
+    data <- merged_data[lubridate::year(as.Date(merged_data$Date))==year1]
+  }
+  else {
+  data <- merged_data[lubridate::year(as.Date(merged_data$Date))<year2 & 
+                                        lubridate::year(as.Date(merged_data$Date))>=year1]
+  }
+  edges <- data.frame(source=data$id.x, target=data$id.y,width=log2(data$Popularity), Date=data$Date)
+  edges <- na.omit(edges)
+}
+
+
+plot_network <- function(year1, year2){
+  edges <- edges_selection(year1,year2)
+  forceNetwork(Links = edges, Nodes = Nodes, Source = "source", Target="target", NodeID="name", 
+               Value = "width",
+               Group = "group",
+               opacity = 0.9,
+               zoom = TRUE,
+               legend = FALSE,
+               Nodesize = 'popularity',
+               colourScale = JS(ColourScale), fontSize = 40)
+}
+
+# SECOND IDIOM UI
+app2UI <- function(id) {
+  ns <- NS(id)
+  tagList(
+    fluidRow(
+      column(4,
+             sliderInput(ns("range1"), 
+                         label = "Range of years left graph:",
+                         min = 2005, max = 2023, value = c(2005, 2023)),
+             sliderInput(ns("range2"), 
+                         label = "Range of years right graphs:",
+                         min = 2005, max = 2023, value = c(2005, 2023))
+      ),
+      column(4, offset = 4,
+             tags$div(id = ns("legend"),
+                      style = "border:1px solid black; padding: 10px;",
+                      tags$h4("Color legend"),
+                      tags$ul(style = "list-style-type: none;",
+                        tags$li(tags$span(style = "color: #FF6666; font-size: 200%;", "\u25CF"), " AFRICA"),
+                        tags$li(tags$span(style = "color: #66FF99; font-size: 200%;", "\u25CF"), " EUROPE"),
+                        tags$li(tags$span(style = "color: #CC99FF; font-size: 200%;", "\u25CF"), " NORTH AMERICA"),
+                        tags$li(tags$span(style = "color: #FF9900; font-size: 200%;", "\u25CF"), " LATIN AMERICA")
+                      )
+                      )
+             )
+      ),
+    actionButton(ns("create_button"), label = 'Create Networks'),
+    fluidRow(
+      column(
+        width=5,forceNetworkOutput(ns("plot1"))
+                           #, width="100%", height="300px"),
+        
+      ),
+      column(
+        width=5,forceNetworkOutput(ns("plot2"))
+                           #, width="100%", height="300px"),
+      )
+  )
+  )
+}
+
+# SECOND IDIOM SERVER
+app2Server <- function(id){
+  moduleServer(id, function(input, output, session) {
+    observeEvent(input$create_button, {
+      output$plot1 <- renderForceNetwork({
+        plot_network(input$range1[1], input$range1[2])
+      })
+      
+      output$plot2 <- renderForceNetwork({
+        plot_network(input$range2[1], input$range2[2])
+    })
+    })
+  })
+}
+
+# THIRD IDIOM
+plot_barChart <- function (cleaned_df, firstYear, secondYear) {
+  condition_years_first = as.numeric(format((cleaned_df$Date), '%Y'))>=firstYear
+  condition_years_last = as.numeric(format((cleaned_df$Date), '%Y'))<=secondYear
+  cleaned_df = cleaned_df[condition_years_first & condition_years_last]
+  grouped_df = na.omit(cleaned_df %>% group_by(`Main Genre`) %>% count())
+  grouped_df$`Main Genre` <- fct_relevel(grouped_df$`Main Genre`, "Others", after = Inf)
+  ggplot(grouped_df, aes(x=`Main Genre`, y=n)) + 
+    labs(x = "Genres", y = "Number of songs published") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+          axis.text.y = element_text(size=12),
+          axis.title.x = element_text(size = 14), 
+          axis.title.y = element_text(size = 14)) +
+            geom_bar(stat = 'identity')
+                                                       
+}
+
+
+# THIRD IDIOM UI
+app3UI <- function(id) {
+  ns <- NS(id)
+  tagList(
+    sliderInput(ns("range_years"), 
+                label = "Range of song years:",
+                min = years_list[1], years_list[length(years_list)], value = c(1977,2023)),
+    plotOutput(ns("barchart")))
+}
+
+# THIRD IDIOM SERVER
+app3Server <- function(id){
+  moduleServer(id, function(input, output, session) {
+    output$barchart <- renderPlot({
+      plot_barChart(cleaned_df, input$range_years[1], input$range_years[2])
+    })
+  })
+}
+
+
+## SHINY APP
+ui <- fluidPage(
+  titlePanel("Analysis of globalization in music"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("idiom", 
+                  label = "Select one of the rappresentation to display",
+                  choices = c(" ","Evolution of the featurings in the year",
+                              "Comparing two networks", "Comparison between genres"),
+                  selected = " "),
+     
+      ),
+  mainPanel(
+    uiOutput("appUI")
+    )
+  )
+  )
+
+
+server <- function(input, output) {
+  observeEvent(input$idiom, {
+    if (input$idiom =="Evolution of the featurings in the year") {
+      output$appUI <- renderUI({ app1UI("app1") })
+    } else if (input$idiom == "Comparing two networks") {
+      output$appUI <- renderUI({ app2UI("app2") })
+    } else if (input$idiom == "Comparison between genres") {
+      output$appUI <- renderUI({ app3UI("app3") })
+    }
+  }, ignoreInit = TRUE)
+  
+  app1Server("app1")
+  app2Server("app2")
+  app3Server("app3")
+}
+
+shinyApp(ui, server)
+
+deployApp()
+    
